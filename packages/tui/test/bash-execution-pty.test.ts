@@ -52,6 +52,22 @@ describe("BashExecutionComponent PTY rendering", () => {
 		expect(text).not.toContain("50%");
 	});
 
+	it("preserves hidden replay rows and color across expansion and collapse", async () => {
+		const component = new BashExecutionComponent("scrollback", ui);
+		component.appendPtyChunk(`\x1b[31mFIRST\x1b[0m\r\n${"body\r\n".repeat(30)}LAST`);
+		component.setComplete(0, false);
+		const preview = await renderUntil(component, () => component.isTranscriptBlockFinalized());
+		expect(preview).not.toContain("FIRST");
+		expect(preview).toContain("LAST");
+		expect(Bun.stripANSI(component.getOutput()).split("\n")).toEqual(["FIRST", ...Array(30).fill("body"), "LAST"]);
+		component.setExpanded(true);
+		const expanded = component.render(100).join("\n");
+		expect(expanded).toContain("FIRST");
+		expect(expanded).toContain("\x1b[38;5;1m");
+		component.setExpanded(false);
+		expect(component.render(100).join("\n")).toBe(preview);
+	});
+
 	for (const exitCode of [0, 7]) {
 		it(`keeps exit ${exitCode} output mutable until queued replay drains`, async () => {
 			const component = new BashExecutionComponent("markers", ui, false);

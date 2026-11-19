@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Completed `!` and `!!` commands keep PTY scrollback as one string instead of retaining styled objects for every row. Collapsed previews wrap only the tail; expanding still shows the full replay.
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

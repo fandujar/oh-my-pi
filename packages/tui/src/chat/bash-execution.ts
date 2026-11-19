@@ -58,6 +58,10 @@ export function bashPtyViewport(ui: TUI): { cols: number; rows: number } {
 
 export class BashExecutionComponent extends Container {
 	#outputLines: string[] = [];
+	// Completed PTY rows are independently styled. Keep the full replay as one
+	// string and wrap only its tail unless the user asks to expand it.
+	#packedReplay?: string;
+	#replayLineCount = 0;
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
@@ -199,7 +203,7 @@ export class BashExecutionComponent extends Container {
 				status: this.#status,
 				startedAt: this.#startedAt,
 				expanded: this.#expanded,
-				output: this.#outputLines.join("\n"),
+				output: this.getOutput(),
 				images,
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
@@ -348,6 +352,11 @@ export class BashExecutionComponent extends Container {
 		const terminal = this.#ptyTerminal;
 		if (!terminal) return;
 		this.#refreshPtyLines(true);
+		if (this.#outputLines.length > PREVIEW_LINES) {
+			this.#packedReplay = this.#outputLines.join("\n");
+			this.#replayLineCount = this.#outputLines.length;
+			this.#outputLines = this.#outputLines.slice(-PREVIEW_LINES);
+		}
 		this.#ptyTerminal = undefined;
 		terminal.dispose();
 		this.#ptyReplayFinalized = true;
@@ -405,7 +414,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
-		const availableLines = this.#outputLines;
+		const availableLines = this.#expanded && this.#packedReplay !== undefined ? this.#packedReplay.split("\n") : this.#outputLines;
 
 		// Full output is shown when expanded or when sixel passthrough renders
 		// the raw payload; the collapsed preview shows only the tail window.
@@ -417,7 +426,7 @@ export class BashExecutionComponent extends Container {
 		const showingAllLines = this.#expanded || hasSixelOutput;
 		// Only the collapsed preview hides lines; when the full output is shown
 		// the footer must not keep advertising hidden lines / ctrl+o.
-		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, availableLines.length - PREVIEW_LINES);
+		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, (this.#replayLineCount || availableLines.length) - PREVIEW_LINES);
 		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 		this.#outputPane.setLines(availableLines);
 
@@ -491,7 +500,7 @@ export class BashExecutionComponent extends Container {
 	 * Get the raw output for creating BashExecutionMessage.
 	 */
 	getOutput(): string {
-		return this.#outputLines.join("\n");
+		return this.#packedReplay ?? this.#outputLines.join("\n");
 	}
 
 	/**
