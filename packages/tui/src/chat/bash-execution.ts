@@ -414,7 +414,8 @@ export class BashExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
-		const availableLines = this.#expanded && this.#packedReplay !== undefined ? this.#packedReplay.split("\n") : this.#outputLines;
+		const availableLines =
+			this.#expanded && this.#packedReplay !== undefined ? this.#packedReplay.split("\n") : this.#outputLines;
 
 		// Full output is shown when expanded or when sixel passthrough renders
 		// the raw payload; the collapsed preview shows only the tail window.
@@ -426,7 +427,9 @@ export class BashExecutionComponent extends Container {
 		const showingAllLines = this.#expanded || hasSixelOutput;
 		// Only the collapsed preview hides lines; when the full output is shown
 		// the footer must not keep advertising hidden lines / ctrl+o.
-		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, (this.#replayLineCount || availableLines.length) - PREVIEW_LINES);
+		const hiddenLineCount = showingAllLines
+			? 0
+			: Math.max(0, (this.#replayLineCount || availableLines.length) - PREVIEW_LINES);
 		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 		this.#outputPane.setLines(availableLines);
 
