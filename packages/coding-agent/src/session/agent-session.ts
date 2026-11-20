@@ -399,6 +399,11 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IdleMaintenance, type IdleMaintenanceOptions } from "./idle-maintenance";
+import {
+	noteRunEnd as noteMemoryRunEnd,
+	noteQuiet as noteMemoryQuiet,
+	noteRunStart as noteMemoryRunStart,
+} from "./idle-memory-trim";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
 import {
 	buildLaunchCompletionBatchMessage,
@@ -1115,6 +1120,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#disposers: Array<() => void> = [];
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
 	#idleMaintenance: IdleMaintenance | undefined;
+	/** This session holds the process-wide idle memory trim off while one of its runs is open. */
+	#memoryTrimHeld = false;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -3142,6 +3149,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
 		this.addDisposer(this.agent.onPauseChange(paused => this.#onAgentPauseChange(paused)));
+		noteMemoryQuiet();
+		this.addDisposer(() => {
+			if (!this.#memoryTrimHeld) return;
+			this.#memoryTrimHeld = false;
+			noteMemoryRunEnd();
+		});
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
@@ -4713,6 +4726,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
+			if (!this.#memoryTrimHeld) {
+				this.#memoryTrimHeld = true;
+				noteMemoryRunStart();
+			}
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
@@ -5127,6 +5144,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
+			if (this.#memoryTrimHeld) {
+				this.#memoryTrimHeld = false;
+				noteMemoryRunEnd();
+			}
 			const settledMessages = event.messages;
 			const activeMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
