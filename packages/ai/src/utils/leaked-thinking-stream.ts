@@ -61,7 +61,17 @@ function cloneToolCall(source: StreamingToolCall): StreamingToolCall {
 	return block;
 }
 
+/**
+ * Mirror the source call's own fields onto the projected copy. `Object.assign`
+ * alone only adds and overwrites, so a field the provider deletes when the call
+ * finishes (openai-completions drops its raw `partialArgs` JSON and
+ * `streamIndex` once arguments are parsed) would otherwise survive on the copy
+ * and be persisted with every tool call.
+ */
 function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): void {
+	for (const key of Object.keys(target)) {
+		if (!Object.hasOwn(source, key)) delete (target as unknown as Record<string, unknown>)[key];
+	}
 	Object.assign(target, source);
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson === undefined) clearStreamingPartialJson(target);

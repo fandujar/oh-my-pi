@@ -737,6 +737,30 @@ describe("wrapLeakedThinkingStream", () => {
 		]);
 	});
 
+	it("drops fields the provider removes when a tool call finishes", async () => {
+		const call = {
+			type: "toolCall",
+			id: "call_1",
+			name: "read",
+			arguments: {},
+			partialArgs: '{"path":',
+			streamIndex: 0,
+		} as ToolCall;
+		const { result } = await runWrapper(inner => {
+			const partial = msg({ content: [call], stopReason: "toolUse" });
+			inner.push({ type: "start", partial });
+			inner.push({ type: "toolcall_start", contentIndex: 0, partial });
+			call.arguments = { path: "a.ts" };
+			const fields = call as unknown as Record<string, unknown>;
+			delete fields.partialArgs;
+			delete fields.streamIndex;
+			inner.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial });
+			inner.push({ type: "done", reason: "toolUse", message: partial });
+		});
+
+		expect(result.content).toEqual([{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } }]);
+	});
+
 	it("heals a fence that only appears in the terminal message (no prior text deltas)", async () => {
 		const leaked = "Intro.```thinking\nquiet\n```Outro.";
 		const { result } = await runWrapper(inner => {

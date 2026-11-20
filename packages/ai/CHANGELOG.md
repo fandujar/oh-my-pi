@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Tool calls from OpenAI-compatible gateways no longer keep their raw streamed argument JSON (`partialArgs`) and `streamIndex` after the call finishes; both were saved with every tool call and held in memory on resume
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
