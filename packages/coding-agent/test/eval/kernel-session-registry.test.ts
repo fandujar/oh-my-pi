@@ -573,3 +573,72 @@ describe("kernel restart notice claim", () => {
 		});
 	}
 });
+
+describe("idle kernel reaping", () => {
+	const HOUR = 3_600_000;
+
+	it("shuts down an idle kernel and tells the next cell its state is gone, once", async () => {
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code, runOptions) => ({
+			cancelled: false,
+			value: runOptions.claimKernelRestartNotice?.() ? `${code}: notice` : `${code}: none`,
+		}));
+		const cell = async (code: string) =>
+			(await registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelOwnerId: "owner" })).value;
+		try {
+			expect(await cell("first")).toBe("first: none");
+			expect(await registry.reapIdle("owner", HOUR)).toBe(0);
+			expect(await registry.reapIdle("owner", HOUR, Date.now() + HOUR)).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+			expect(await cell("after reap")).toBe("after reap: notice");
+			expect(await cell("later")).toBe("later: none");
+			expect(kernels).toHaveLength(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("never reaps a kernel with a cell in flight or one another owner shares", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => {
+			if (code === "slow") {
+				started.resolve();
+				await release.promise;
+			}
+			return { cancelled: false, value: code };
+		});
+		try {
+			const running = registry.executeOnSession("slow", "/tmp", { sessionId: "busy", kernelOwnerId: "owner" });
+			await started.promise;
+			expect(await registry.reapIdle("owner", 0, Date.now() + HOUR)).toBe(0);
+			release.resolve();
+			await running;
+
+			await registry.executeOnSession("x", "/tmp", { sessionId: "shared", kernelOwnerId: "owner" });
+			await registry.executeOnSession("x", "/tmp", { sessionId: "shared", kernelOwnerId: "other" });
+			expect(await registry.reapIdle("owner", HOUR, Date.now() + HOUR)).toBe(1);
+			expect(kernels.map(kernel => kernel.alive)).toEqual([false, true]);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("an explicit reset after a reap gives no stale-state notice", async () => {
+		const { registry } = createFakeRegistry(async (_kernel, code, runOptions) => ({
+			cancelled: false,
+			value: runOptions.claimKernelRestartNotice?.() ? "notice" : code,
+		}));
+		try {
+			await registry.executeOnSession("a", "/tmp", { sessionId: "r", kernelOwnerId: "owner" });
+			await registry.reapIdle("owner", HOUR, Date.now() + HOUR);
+			const result = await registry.executeOnSession("b", "/tmp", {
+				sessionId: "r",
+				kernelOwnerId: "owner",
+				reset: true,
+			});
+			expect(result.value).toBe("b");
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+});

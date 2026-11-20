@@ -1,13 +1,14 @@
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { disposeVmContextsByOwner } from "../eval/js/context-manager";
+import { disposeVmContextsByOwner, reapIdleVmContexts } from "../eval/js/context-manager";
 import { namespaceSessionId as namespaceJsSessionId } from "../eval/js";
 import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
 import {
 	disposeKernelSessionsByOwner,
 	executePython as executePythonCommand,
 	type PythonResult,
+	reapIdleKernelSessions,
 } from "../eval/py/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { ExtensionRunner } from "../extensibility/extensions";
@@ -16,7 +17,10 @@ import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
-import { cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
+import { cfgEvalKernelIdleMinutes, cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
+
+/** How often a session checks its retained kernels for idleness. */
+const KERNEL_IDLE_CHECK_MS = 60_000;
 
 /** Capabilities the eval runner borrows from its owning session. */
 export interface EvalRunnerHost {
@@ -46,10 +50,29 @@ export class EvalRunner {
 	readonly #disposeStarted = Promise.withResolvers<void>();
 	#staleKernelReleaseQueued = false;
 	#pendingKernelRelease: Promise<void> | undefined;
+	#idleReapTimer: NodeJS.Timeout | undefined;
 
 	constructor(host: EvalRunnerHost, options: { kernelOwnerId: string }) {
 		this.#host = host;
 		this.#kernelOwnerId = options.kernelOwnerId;
+		// Kernels hold 30-50 MB each and an idle session otherwise keeps them for days.
+		this.#idleReapTimer = setInterval(() => void this.#reapIdleKernels(), KERNEL_IDLE_CHECK_MS);
+		this.#idleReapTimer.unref?.();
+	}
+
+	async #reapIdleKernels(): Promise<void> {
+		const minutes = cfgEvalKernelIdleMinutes.get(this.#host.settings);
+		if (this.#disposing || !(minutes > 0) || this.#activeExecutions.size > 0) return;
+		const idleMs = minutes * 60_000;
+		const results = await Promise.allSettled([
+			reapIdleKernelSessions(this.#kernelOwnerId, idleMs),
+			reapIdleVmContexts(this.#kernelOwnerId, idleMs),
+		]);
+		for (const result of results) {
+			if (result.status === "rejected")
+				logger.warn("Idle eval kernel shutdown failed", { error: String(result.reason) });
+			else if (result.value > 0) logger.debug("Shut down idle eval kernels", { count: result.value, minutes });
+		}
 	}
 
 	/** Executes Python in the session's shared kernel. */
@@ -179,6 +202,8 @@ export class EvalRunner {
 	/** Prevents new Python executions before asynchronous disposal starts. */
 	beginDispose(): void {
 		this.#disposing = true;
+		clearInterval(this.#idleReapTimer);
+		this.#idleReapTimer = undefined;
 		this.#disposeStarted.resolve();
 	}
 

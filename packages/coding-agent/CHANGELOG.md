@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `eval.kernelIdleMinutes` (default 30): a session shuts down its retained Python and JavaScript kernels after that many minutes without a cell; the next cell starts fresh and says earlier state is gone. `0` keeps them for the life of the session
+
+### Changed
+
+- After 90 seconds with no run in progress, the process runs a full garbage collection and returns freed pages to the OS, so an idle session no longer holds its peak footprint until it is swapped out
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

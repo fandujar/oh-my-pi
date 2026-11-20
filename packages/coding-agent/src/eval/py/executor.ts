@@ -581,6 +581,11 @@ export async function disposeKernelSessionsByOwner(ownerId: string, options?: Di
 	await sessionRegistry.disposeByOwner(ownerId, options);
 }
 
+/** Shut down `ownerId`'s retained Python kernels that ran nothing for `idleMs`; returns how many. */
+export async function reapIdleKernelSessions(ownerId: string, idleMs: number): Promise<number> {
+	return await sessionRegistry.reapIdle(ownerId, idleMs);
+}
+
 /** Projects against an already-retained, idle Python session without starting a kernel. */
 export async function shadowPlanPythonIfPresent(options: {
 	cwd: string;

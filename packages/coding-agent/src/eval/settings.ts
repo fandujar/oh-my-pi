@@ -102,6 +102,25 @@ export const cfgPythonKernelMode = register({
 	},
 });
 
+export const cfgEvalKernelIdleMinutes = register({
+	id: "eval.kernelIdleMinutes",
+	type: "number",
+	default: 30,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Idle Kernel Shutdown",
+		description:
+			"Shut down a session's retained Python and JavaScript kernels after this many minutes without a cell; the next cell starts fresh and says earlier state is gone",
+		options: [
+			{ value: "0", label: "Never", description: "Keep kernels until the session ends" },
+			{ value: "10", label: "10 minutes" },
+			{ value: "30", label: "30 minutes" },
+			{ value: "120", label: "2 hours" },
+		],
+	},
+});
+
 export const cfgPythonInterpreter = register({
 	id: "python.interpreter",
 	type: "string",

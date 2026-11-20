@@ -120,6 +120,8 @@ interface JsSession {
 	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
+	/** When a cell or tool request last touched this runtime; the idle reaper's clock. */
+	lastUsedAt: number;
 }
 
 interface StartingJsSession extends SessionOwners {
@@ -246,6 +248,7 @@ export async function invokeJsTool(
 ): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
 	const session = sessions.get(options.sessionKey);
 	if (!session || session.state !== "alive") throw new EvalKernelNotRunningError("JavaScript");
+	session.lastUsedAt = Date.now();
 
 	const runId = `tool-${crypto.randomUUID()}`;
 	const { promise, resolve, reject } = Promise.withResolvers<{ value: unknown }>();
@@ -282,6 +285,7 @@ export async function invokeJsTool(
 	} finally {
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		session.lastUsedAt = Date.now();
 	}
 
 	if (!isRecord(envelope) || envelope.ok !== true) {
@@ -470,6 +474,27 @@ export async function disposeVmContextsByOwner(ownerId: string, options?: Dispos
 }
 
 /**
+ * Shut down `ownerId`'s retained JS runtimes that ran nothing for `idleMs`. A runtime
+ * with a run, tool request, snapshot, or shadow run in flight, or shared with another
+ * owner, is kept. The next cell on a reaped key gets a fresh runtime and the
+ * "state is unavailable" notice, as after a crash. Returns how many were shut down.
+ */
+export async function reapIdleVmContexts(ownerId: string, idleMs: number, now = Date.now()): Promise<number> {
+	const toKill: JsSession[] = [];
+	for (const [sessionKey, session] of Array.from(sessions)) {
+		if (!session.ownerIds.has(ownerId) || session.ownerIds.size !== 1 || session.state !== "alive") continue;
+		if (session.pending.size > 0 || session.pendingSnapshots.size > 0 || session.pendingShadowRuns.size > 0) continue;
+		if (resettingSessions.has(sessionKey) || startingSessions.has(sessionKey)) continue;
+		if (now - session.lastUsedAt < idleMs) continue;
+		sessions.delete(sessionKey);
+		lostSessions.set(sessionKey, new Set(session.ownerIds));
+		toKill.push(session);
+	}
+	await Promise.all(toKill.map(session => killSession(session, new ToolError("JS context idle"), { force: false })));
+	return toKill.length;
+}
+
+/**
  * Smoke probe: spawn the JS evaluator through the worker-host entry and prove
  * it answers the `init` handshake in a real isolated subprocess (not the inline
  * fallback). Catches silent process-load and init-message regressions
@@ -492,6 +517,7 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		lastUsedAt: Date.now(),
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -545,6 +571,7 @@ async function runOnce(
 		settled: false,
 	};
 	session.pending.set(runId, pending);
+	session.lastUsedAt = Date.now();
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
@@ -615,6 +642,7 @@ async function runOnce(
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		session.lastUsedAt = Date.now();
 	}
 }
 
@@ -664,6 +692,7 @@ async function acquireSession(
 			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			lastUsedAt: Date.now(),
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.

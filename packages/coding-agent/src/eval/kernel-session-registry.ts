@@ -99,6 +99,13 @@ interface KernelSessionRegistry<
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
+	/**
+	 * Shut down retained kernels owned solely by `ownerId` that have run no cell for `idleMs`.
+	 * A kernel with a cell in flight, a reset, or a replacement under way is never reaped. The
+	 * next cell on a reaped key starts a fresh kernel and says the previous state is gone.
+	 * Returns how many kernels were shut down.
+	 */
+	reapIdle(ownerId: string, idleMs: number, now?: number): Promise<number>;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -146,6 +153,11 @@ export function createKernelSessionRegistry<
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
 	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
 	const servedKernels = new WeakMap<TSession, TKernel>();
+	// When each session last finished a cell, and how many it is running now: the idle reaper's inputs.
+	const lastUsedAt = new WeakMap<TSession, number>();
+	const activeCells = new WeakMap<TSession, number>();
+	// Session keys whose kernel the idle reaper shut down; the next cell on one says its state is gone.
+	const reapedKeys = new Set<string>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -320,6 +332,8 @@ export function createKernelSessionRegistry<
 	}
 
 	async function resetSession(sessionKey: string): Promise<void> {
+		// An explicit reset asked for fresh state, so a pending idle-reap notice is moot.
+		reapedKeys.delete(sessionKey);
 		const existing =
 			sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 		if (!existing) return;
@@ -426,8 +440,12 @@ export function createKernelSessionRegistry<
 	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
-		const kernel = sessions.get(sessionKey)?.kernel;
-		return kernel?.isAlive() ? kernel : undefined;
+		const session = sessions.get(sessionKey);
+		const kernel = session?.kernel;
+		if (!session || !kernel?.isAlive()) return undefined;
+		// A tool request against the kernel is use, as a cell is.
+		lastUsedAt.set(session, Date.now());
+		return kernel;
 	}
 
 	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
@@ -462,35 +480,71 @@ export function createKernelSessionRegistry<
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
 		throwIfCallerCancelled(options);
-		const kernel = await acquireLiveSessionKernel(session, cwd, options);
-		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
-		throwIfCallerCancelled(options);
-		const claimKernelRestartNotice = (): boolean => {
-			const previous = servedKernels.get(session);
-			servedKernels.set(session, kernel);
-			return previous !== undefined && previous !== kernel;
-		};
-		const runOptions = { ...options, cwd, claimKernelRestartNotice };
-		let result: R;
+		activeCells.set(session, (activeCells.get(session) ?? 0) + 1);
+		lastUsedAt.set(session, Date.now());
 		try {
-			result = await descriptor.executeWithKernel(kernel, code, runOptions);
-		} catch (err) {
-			if (
-				descriptor.isCancellation?.(err) ||
-				isCancellationError(err, descriptor.cancelledErrorClass, {
-					signal: options.signal,
-					deadlineMs: options.deadlineMs,
-				})
-			)
-				throw err;
-			if (kernel.isAlive()) throw err;
-			throw new Error(
-				`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
-				{ cause: err },
-			);
+			const kernel = await acquireLiveSessionKernel(session, cwd, options);
+			if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
+			throwIfCallerCancelled(options);
+			let reaped = reapedKeys.delete(sessionKey);
+			const claimKernelRestartNotice = (): boolean => {
+				const previous = servedKernels.get(session);
+				servedKernels.set(session, kernel);
+				if (reaped) {
+					reaped = false;
+					return true;
+				}
+				return previous !== undefined && previous !== kernel;
+			};
+			const runOptions = { ...options, cwd, claimKernelRestartNotice };
+			try {
+				return await descriptor.executeWithKernel(kernel, code, runOptions);
+			} catch (err) {
+				if (
+					descriptor.isCancellation?.(err) ||
+					isCancellationError(err, descriptor.cancelledErrorClass, {
+						signal: options.signal,
+						deadlineMs: options.deadlineMs,
+					})
+				)
+					throw err;
+				if (kernel.isAlive()) throw err;
+				throw new Error(
+					`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
+					{ cause: err },
+				);
+			}
+		} finally {
+			activeCells.set(session, (activeCells.get(session) ?? 1) - 1);
+			lastUsedAt.set(session, Date.now());
 		}
-		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
+	async function reapIdle(ownerId: string, idleMs: number, now = Date.now()): Promise<number> {
+		const reaped: TSession[] = [];
+		for (const [sessionKey, session] of Array.from(sessions)) {
+			if (!session.ownerIds.has(ownerId) || session.ownerIds.size !== 1) continue;
+			if ((activeCells.get(session) ?? 0) > 0) continue;
+			if (resettingSessions.has(sessionKey) || startingSessions.has(sessionKey)) continue;
+			if (replacingSessionKernels.has(session)) continue;
+			const usedAt = lastUsedAt.get(session);
+			if (usedAt === undefined || now - usedAt < idleMs) continue;
+			descriptor.invalidateSession?.(session);
+			sessions.delete(sessionKey);
+			reapedKeys.add(sessionKey);
+			reaped.push(session);
+		}
+		const results = await Promise.all(reaped.map(session => settleShutdown(session, false)));
+		for (let i = 0; i < reaped.length; i += 1) {
+			const result = results[i];
+			if (result?.status === "fulfilled" && result.value?.confirmed !== false) continue;
+			logger.warn(`${descriptor.languageLabel} idle kernel shutdown not confirmed`, {
+				kernelSessionId: reaped[i]?.sessionId,
+				reason: result?.status === "rejected" ? String(result.reason) : "not confirmed",
+			});
+		}
+		return reaped.length;
+	}
+
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession, reapIdle };
 }
