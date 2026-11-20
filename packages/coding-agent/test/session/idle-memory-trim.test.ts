@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	holdMemoryTrim,
 	IDLE_MEMORY_TRIM_DELAY_MS,
 	noteQuiet,
 	noteRunEnd,
@@ -52,5 +53,17 @@ describe("idle memory trim", () => {
 		noteRunStart();
 		vi.advanceTimersByTime(IDLE_MEMORY_TRIM_DELAY_MS);
 		expect(shrinkCalls).toBe(0);
+		noteRunEnd();
+	});
+
+	it("a user command holds the trim while it runs and arms it once it settles, even on failure", async () => {
+		const command = Promise.withResolvers<void>();
+		const held = holdMemoryTrim(command.promise);
+		vi.advanceTimersByTime(IDLE_MEMORY_TRIM_DELAY_MS * 2);
+		expect(shrinkCalls).toBe(0);
+		command.reject(new Error("exit 1"));
+		await expect(held).rejects.toThrow("exit 1");
+		vi.advanceTimersByTime(IDLE_MEMORY_TRIM_DELAY_MS);
+		expect(shrinkCalls).toBe(1);
 	});
 });

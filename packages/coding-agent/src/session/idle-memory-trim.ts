@@ -49,3 +49,12 @@ export function noteRunEnd(): void {
 	busy = Math.max(0, busy - 1);
 	if (busy === 0) arm();
 }
+
+/**
+ * Hold the trim off while `work` runs and arm it once `work` settles: user `!`/`$` commands
+ * are not agent runs, yet they are what leaves the most garbage behind.
+ */
+export function holdMemoryTrim<T>(work: Promise<T>): Promise<T> {
+	noteRunStart();
+	return work.finally(noteRunEnd);
+}

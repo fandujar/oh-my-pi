@@ -400,6 +400,7 @@ import {
 } from "./exit-diagnostics";
 import { IdleMaintenance, type IdleMaintenanceOptions } from "./idle-maintenance";
 import {
+	holdMemoryTrim,
 	noteRunEnd as noteMemoryRunEnd,
 	noteQuiet as noteMemoryQuiet,
 	noteRunStart as noteMemoryRunStart,
@@ -13721,7 +13722,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param options.onRecorded Receives the `bashExecution` message the run is recorded as, once it is persisted or queued; a throw is logged
 	 */
 	executeBash(command: string, onChunk?: (chunk: string) => void, options?: BashExecuteOptions): Promise<BashResult> {
-		return this.#bash.executeBash(command, onChunk, options);
+		return holdMemoryTrim(this.#bash.executeBash(command, onChunk, options));
 	}
 
 	/** Record a bash result supplied outside executeBash in the current ownership scope. */
@@ -13761,7 +13762,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		onChunk?: (chunk: string) => void,
 		options?: PythonExecuteOptions,
 	): Promise<PythonResult> {
-		return this.#eval.executePython(code, onChunk, options);
+		return holdMemoryTrim(this.#eval.executePython(code, onChunk, options));
 	}
 
 	assertEvalExecutionAllowed(): void {
